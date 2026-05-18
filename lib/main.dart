@@ -64,8 +64,8 @@ void onStart(ServiceInstance service) async {
   var androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
   await bgNotifications.initialize(InitializationSettings(android: androidInit));
 
-  // В фоне проверяем цену раз в 60 секунд через быстрое API Crypto.com
-  Timer.periodic(const Duration(seconds: 60), (timer) async {
+  // Функция запроса для фона
+  Future<void> fetchPrice() async {
     try {
       final response = await http.get(Uri.parse(
           'https://api.crypto.com/v2/public/get-ticker?instrument_name=ZEC_USDT'));
@@ -78,6 +78,7 @@ void onStart(ServiceInstance service) async {
         double low = double.tryParse(prefs.getString('low') ?? "") ?? 0;
         double high = double.tryParse(prefs.getString('high') ?? "") ?? 999999;
 
+        // Отправляем цену в UI
         service.invoke('updatePrice', {'price': price});
 
         if (price <= low && low != 0) {
@@ -89,6 +90,14 @@ void onStart(ServiceInstance service) async {
     } catch (e) {
       debugPrint("Фоновая ошибка сети: $e");
     }
+  }
+
+  // Запускаем сразу при старте службы
+  fetchPrice();
+
+  // И повторно каждые 60 секунд
+  Timer.periodic(const Duration(seconds: 60), (timer) async {
+    await fetchPrice();
   });
 }
 
@@ -125,6 +134,7 @@ class PremiumTrackerScreen extends StatefulWidget {
 
 class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with SingleTickerProviderStateMixin {
   double currentPrice = 0.0;
+  bool isLoading = true; // Переменная для отслеживания первой загрузки
   final lowController = TextEditingController();
   final highController = TextEditingController();
   late AnimationController _pulseController;
@@ -142,6 +152,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
       if (event != null && mounted) {
         setState(() {
           currentPrice = event['price'];
+          isLoading = false; // Данные пришли из фона — скрываем загрузку
         });
       }
     });
@@ -152,7 +163,6 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     )..repeat(reverse: true);
   }
 
-  // ТУТ ИСПРАВЛЕНО: androidInit заменено на android
   void _initNotifications() async {
     var android = const AndroidInitializationSettings('@mipmap/ic_launcher');
     var ios = const DarwinInitializationSettings();
@@ -191,6 +201,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
         if (mounted) {
           setState(() {
             currentPrice = price;
+            isLoading = false; // Данные успешно загружены!
           });
           _checkAlerts();
         }
@@ -301,18 +312,29 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
         const Text("Курс сейчас ZEC (Crypto.com):", 
           style: TextStyle(fontSize: 18, color: Colors.white54, letterSpacing: 1.2)),
         const SizedBox(height: 16),
-        Text(
-          "\$${currentPrice.toStringAsFixed(2)}",
-          style: TextStyle(
-            fontSize: 72,
-            fontWeight: FontWeight.bold,
-            letterSpacing: -2,
-            color: const Color(0xFFFF9F43),
-            shadows: [
-              Shadow(blurRadius: 30, color: const Color(0xFFFF9F43).withOpacity(0.5)),
-            ],
+        // Если идёт загрузка — показываем текст "Загрузка...", если данные есть — красивую цену
+        isLoading 
+        ? const SizedBox(
+            height: 100,
+            child: Center(
+              child: Text(
+                "Загрузка...",
+                style: TextStyle(fontSize: 32, color: Colors.white38, fontWeight: FontWeight.w300),
+              ),
+            ),
+          )
+        : Text(
+            "\$${currentPrice.toStringAsFixed(2)}",
+            style: TextStyle(
+              fontSize: 72,
+              fontWeight: FontWeight.bold,
+              letterSpacing: -2,
+              color: const Color(0xFFFF9F43),
+              shadows: [
+                Shadow(blurRadius: 30, color: const Color(0xFFFF9F43).withOpacity(0.5)),
+              ],
+            ),
           ),
-        ),
       ],
     );
   }
