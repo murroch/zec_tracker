@@ -5,8 +5,105 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
-void main() => runApp(const ZecPremiumApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Инициализируем фоновую службу перед запуском приложения
+  await initializeBackgroundService();
+  
+  runApp(const ZecPremiumApp());
+}
+
+// Настройка фоновой службы
+Future<void> initializeBackgroundService() async {
+  final service = FlutterBackgroundService();
+
+  // Настройка канала уведомлений для фоновой службы
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'zec_foreground_id', 
+    'ZEC Background Service',
+    description: 'Этот канал удерживает приложение в фоне для проверки курса',
+    importance: Importance.low, // Низкая важность, чтобы не пищало постоянно в шторке
+  );
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: true,
+      isForegroundMode: true, // Говорим системе, что мы Foreground процесс
+      notificationChannelId: 'zec_foreground_id',
+      initialNotificationTitle: 'ZEC Трекер',
+      initialNotificationContent: 'Мониторинг курса запущен в фоне...',
+      foregroundServiceNotificationId: 888,
+    ),
+    iosConfiguration: IosConfiguration(
+      autoStart: true,
+      onForeground: onStart,
+      onBackground: onIosBackground,
+    ),
+  );
+}
+
+@pragma('vm:entry-point')
+Future<bool> onIosBackground(ServiceInstance service) async {
+  return true;
+}
+
+// Этот код выполняется отдельно, когда приложение свернуто
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+  
+  FlutterLocalNotificationsPlugin bgNotifications = FlutterLocalNotificationsPlugin();
+  var androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
+  await bgNotifications.initialize(InitializationSettings(android: androidInit));
+
+  // В фоне проверяем цену раз в 60 секунд (чтобы CoinGecko не забанил IP за спам-запросы)
+  Timer.periodic(const Duration(seconds: 60), (timer) async {
+    try {
+      final response = await http.get(Uri.parse(
+          'https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd'));
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        double price = data['zcash']['usd'].toDouble();
+
+        // Загружаем сохраненные пользователем лимиты
+        final prefs = await SharedPreferences.getInstance();
+        double low = double.tryParse(prefs.getString('low') ?? "") ?? 0;
+        double high = double.tryParse(prefs.getString('high') ?? "") ?? 999999;
+
+        // Отправляем новую цену в открытое приложение (если оно развернуто)
+        service.invoke('updatePrice', {'price': price});
+
+        // Проверяем лимиты прямо из фона!
+        if (price <= low && low != 0) {
+          _showBgNotification(bgNotifications, "ZEC упал! Цена: \$$price");
+        } else if (price >= high && high != 0) {
+          _showBgNotification(bgNotifications, "ZEC вырос! Цена: \$$price");
+        }
+      }
+    } catch (e) {
+      debugPrint("Фоновая ошибка сети: $e");
+    }
+  });
+}
+
+Future<void> _showBgNotification(FlutterLocalNotificationsPlugin nodPlugin, String message) async {
+  var details = const NotificationDetails(
+    android: AndroidNotificationDetails('zec_id', 'ZEC Alerts', importance: Importance.max, priority: Priority.high),
+    iOS: DarwinNotificationDetails(),
+  );
+  await nodPlugin.show(1, 'ZEC Premium (Фон)', message, details);
+}
+
 
 class ZecPremiumApp extends StatelessWidget {
   const ZecPremiumApp({super.key});
@@ -35,6 +132,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
   final lowController = TextEditingController();
   final highController = TextEditingController();
   late AnimationController _pulseController;
+  Timer? _uiTimer;
   FlutterLocalNotificationsPlugin notifications = FlutterLocalNotificationsPlugin();
 
   @override
@@ -42,9 +140,17 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     super.initState();
     _initNotifications();
     _loadSettings();
-    _startPriceCheck();
+    _startUiPriceCheck();
     
-    // Анимация пульсирующей точки "LIVE"
+    // Подписываемся на обновления цены от фоновой службы
+    FlutterBackgroundService().on('updatePrice').listen((event) {
+      if (event != null && mounted) {
+        setState(() {
+          currentPrice = event['price'];
+        });
+      }
+    });
+    
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
@@ -77,19 +183,22 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     );
   }
 
-  Future<void> _fetchPrice() async {
+  // Запрос цены для открытого экрана
+  Future<void> _fetchPriceForUi() async {
     try {
       final response = await http.get(Uri.parse(
           'https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd'));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        setState(() {
-          currentPrice = data['zcash']['usd'].toDouble();
-        });
-        _checkAlerts();
+        if (mounted) {
+          setState(() {
+            currentPrice = data['zcash']['usd'].toDouble();
+          });
+          _checkAlerts();
+        }
       }
     } catch (e) {
-      debugPrint("Ошибка сети: $e");
+      debugPrint("Ошибка сети в приложении: $e");
     }
   }
 
@@ -112,9 +221,12 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     await notifications.show(0, 'ZEC Premium', message, details);
   }
 
-  void _startPriceCheck() {
-    Timer.periodic(const Duration(minutes: 1), (timer) => _fetchPrice());
-    _fetchPrice();
+  // Тот самый таймер на 10 секунд, пока приложение открыто
+  void _startUiPriceCheck() {
+    _fetchPriceForUi(); 
+    _uiTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      _fetchPriceForUi();
+    });
   }
 
   @override
@@ -122,7 +234,6 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     return Scaffold(
       body: Stack(
         children: [
-          // 1. Красивый градиентный фон
           Container(
             decoration: const BoxDecoration(
               gradient: RadialGradient(
@@ -132,7 +243,6 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
               ),
             ),
           ),
-          
           SafeArea(
             child: Column(
               children: [
@@ -180,7 +290,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
                 ),
               ),
               const SizedBox(width: 8),
-              const Text("ОБНОВЛЕНИЕ", style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+              const Text("LIVE 10s", style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold)),
             ],
           ),
         ],
@@ -270,7 +380,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
         ),
         child: const Center(
           child: Text(
-            "Сохранить",
+            "Сохранить лимиты",
             style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16, letterSpacing: 1.1),
           ),
         ),
@@ -280,6 +390,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
 
   @override
   void dispose() {
+    _uiTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
