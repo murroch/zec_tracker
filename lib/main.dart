@@ -16,16 +16,15 @@ void main() async {
   runApp(const ZecPremiumApp());
 }
 
-// Настройка фоновой службы
+// Настройка фоновой службы (Background)
 Future<void> initializeBackgroundService() async {
   final service = FlutterBackgroundService();
 
-  // Настройка канала уведомлений для фоновой службы
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     'zec_foreground_id', 
     'ZEC Background Service',
     description: 'Этот канал удерживает приложение в фоне для проверки курса',
-    importance: Importance.low, // Низкая важность, чтобы не пищало постоянно в шторке
+    importance: Importance.low, 
   );
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -37,7 +36,7 @@ Future<void> initializeBackgroundService() async {
     androidConfiguration: AndroidConfiguration(
       onStart: onStart,
       autoStart: true,
-      isForegroundMode: true, // Говорим системе, что мы Foreground процесс
+      isForegroundMode: true, 
       notificationChannelId: 'zec_foreground_id',
       initialNotificationTitle: 'ZEC Трекер',
       initialNotificationContent: 'Мониторинг курса запущен в фоне...',
@@ -56,7 +55,7 @@ Future<bool> onIosBackground(ServiceInstance service) async {
   return true;
 }
 
-// Этот код выполняется отдельно, когда приложение свернуто
+// Этот код выполняется отдельно на уровне системы, когда приложение свернуто
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
@@ -65,25 +64,26 @@ void onStart(ServiceInstance service) async {
   var androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
   await bgNotifications.initialize(InitializationSettings(android: androidInit));
 
-  // В фоне проверяем цену раз в 60 секунд (чтобы CoinGecko не забанил IP за спам-запросы)
+  // В фоне проверяем цену раз в 60 секунд через быстрое API Crypto.com
   Timer.periodic(const Duration(seconds: 60), (timer) async {
     try {
       final response = await http.get(Uri.parse(
-          'https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd'));
+          'https://api.crypto.com/v2/public/get-ticker?instrument_name=ZEC_USDT'));
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        double price = data['zcash']['usd'].toDouble();
+        // Достаем актуальный курс из ответа Crypto.com
+        double price = double.parse(data['result']['data'][0]['a'].toString());
 
         // Загружаем сохраненные пользователем лимиты
         final prefs = await SharedPreferences.getInstance();
         double low = double.tryParse(prefs.getString('low') ?? "") ?? 0;
         double high = double.tryParse(prefs.getString('high') ?? "") ?? 999999;
 
-        // Отправляем новую цену в открытое приложение (если оно развернуто)
+        // Передаем новую цену в UI, если приложение открыто
         service.invoke('updatePrice', {'price': price});
 
-        // Проверяем лимиты прямо из фона!
+        // Проверяем триггеры уведомлений из фона
         if (price <= low && low != 0) {
           _showBgNotification(bgNotifications, "ZEC упал! Цена: \$$price");
         } else if (price >= high && high != 0) {
@@ -142,7 +142,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     _loadSettings();
     _startUiPriceCheck();
     
-    // Подписываемся на обновления цены от фоновой службы
+    // Слушаем фоновую службу: если она получила свежую цену, сразу обновляем экран
     FlutterBackgroundService().on('updatePrice').listen((event) {
       if (event != null && mounted) {
         setState(() {
@@ -160,7 +160,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
   void _initNotifications() async {
     var android = const AndroidInitializationSettings('@mipmap/ic_launcher');
     var ios = const DarwinInitializationSettings();
-    await notifications.initialize(InitializationSettings(android: android, iOS: ios));
+    await notifications.initialize(InitializationSettings(android: androidInit, iOS: ios));
   }
 
   void _loadSettings() async {
@@ -183,16 +183,18 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     );
   }
 
-  // Запрос цены для открытого экрана
+  // Запрос цены по таймеру для открытого экрана (раз в 10 секунд)
   Future<void> _fetchPriceForUi() async {
     try {
       final response = await http.get(Uri.parse(
-          'https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd'));
+          'https://api.crypto.com/v2/public/get-ticker?instrument_name=ZEC_USDT'));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
+        double price = double.parse(data['result']['data'][0]['a'].toString());
+        
         if (mounted) {
           setState(() {
-            currentPrice = data['zcash']['usd'].toDouble();
+            currentPrice = price;
           });
           _checkAlerts();
         }
@@ -221,7 +223,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     await notifications.show(0, 'ZEC Premium', message, details);
   }
 
-  // Тот самый таймер на 10 секунд, пока приложение открыто
+  // Таймер на 10 секунд для активного режима
   void _startUiPriceCheck() {
     _fetchPriceForUi(); 
     _uiTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
@@ -301,7 +303,7 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
   Widget _buildPriceDisplay() {
     return Column(
       children: [
-        const Text("Курс сейчас ZEC:", 
+        const Text("Курс сейчас ZEC (Crypto.com):", 
           style: TextStyle(fontSize: 18, color: Colors.white54, letterSpacing: 1.2)),
         const SizedBox(height: 16),
         Text(
