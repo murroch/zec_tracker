@@ -55,7 +55,7 @@ Future<bool> onIosBackground(ServiceInstance service) async {
   return true;
 }
 
-// Этот код выполняется отдельно на уровне системы, когда приложение свернуто
+// Код фоновой службы
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
@@ -72,18 +72,14 @@ void onStart(ServiceInstance service) async {
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        // Достаем актуальный курс из ответа Crypto.com
         double price = double.parse(data['result']['data'][0]['a'].toString());
 
-        // Загружаем сохраненные пользователем лимиты
         final prefs = await SharedPreferences.getInstance();
         double low = double.tryParse(prefs.getString('low') ?? "") ?? 0;
         double high = double.tryParse(prefs.getString('high') ?? "") ?? 999999;
 
-        // Передаем новую цену в UI, если приложение открыто
         service.invoke('updatePrice', {'price': price});
 
-        // Проверяем триггеры уведомлений из фона
         if (price <= low && low != 0) {
           _showBgNotification(bgNotifications, "ZEC упал! Цена: \$$price");
         } else if (price >= high && high != 0) {
@@ -142,7 +138,6 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     _loadSettings();
     _startUiPriceCheck();
     
-    // Слушаем фоновую службу: если она получила свежую цену, сразу обновляем экран
     FlutterBackgroundService().on('updatePrice').listen((event) {
       if (event != null && mounted) {
         setState(() {
@@ -157,10 +152,11 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     )..repeat(reverse: true);
   }
 
+  // ТУТ ИСПРАВЛЕНО: androidInit заменено на android
   void _initNotifications() async {
     var android = const AndroidInitializationSettings('@mipmap/ic_launcher');
     var ios = const DarwinInitializationSettings();
-    await notifications.initialize(InitializationSettings(android: androidInit, iOS: ios));
+    await notifications.initialize(InitializationSettings(android: android, iOS: ios));
   }
 
   void _loadSettings() async {
@@ -223,7 +219,6 @@ class _PremiumTrackerScreenState extends State<PremiumTrackerScreen> with Single
     await notifications.show(0, 'ZEC Premium', message, details);
   }
 
-  // Таймер на 10 секунд для активного режима
   void _startUiPriceCheck() {
     _fetchPriceForUi(); 
     _uiTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
